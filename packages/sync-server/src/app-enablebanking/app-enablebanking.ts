@@ -525,14 +525,43 @@ app.post(
       const booked: ReturnType<typeof normalizeTransaction>[] = [];
       const pending: ReturnType<typeof normalizeTransaction>[] = [];
 
+      let skipped = 0;
       for (const tx of rawTransactions) {
         const normalized = normalizeTransaction(tx);
+
+        // Actual's client inserts each transaction into its local SQLite; a
+        // transaction whose date is empty / not YYYY-MM-DD, or whose amount is
+        // not a finite number, makes that INSERT fail with a SQLITE_ERROR and
+        // aborts the entire account sync. Enable Banking emits such records for
+        // some pending / edge entries, so drop the unimportable ones here
+        // instead of poisoning the whole batch.
+        const hasValidDate = /^\d{4}-\d{2}-\d{2}$/.test(normalized.date ?? '');
+        const hasValidAmount = Number.isFinite(
+          Number(normalized.transactionAmount?.amount),
+        );
+        if (!hasValidDate || !hasValidAmount) {
+          skipped++;
+          debug(
+            'Skipping unimportable transaction (date=%o amount=%o id=%o)',
+            normalized.date,
+            normalized.transactionAmount?.amount,
+            normalized.transactionId,
+          );
+          continue;
+        }
+
         all.push(normalized);
         if (normalized.booked) {
           booked.push(normalized);
         } else {
           pending.push(normalized);
         }
+      }
+      if (skipped > 0) {
+        console.warn(
+          `[enable-banking] skipped ${skipped} unimportable transaction(s) ` +
+            `(empty date or non-numeric amount) for account ${accountId}`,
+        );
       }
 
       res.send({
